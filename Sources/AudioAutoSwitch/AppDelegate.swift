@@ -4,34 +4,60 @@ import os
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private static let targetUIDKey = "targetDeviceUID"
-    private static let targetNameKey = "targetDeviceName"
     private static let targetVolumeKey = "targetVolume"
     private static let volumeChoices = stride(from: 10, through: 100, by: 10).map { $0 }
+    /// Input devices are always set to full volume.
+    private static let inputVolume = 100
     /// Bluetooth devices often reconnect a few seconds after wake/login, so keep looking for a while.
     private static let retryInterval: TimeInterval = 1
     private static let maxAttempts = 20
+
+    /// Menu item payload for picking a target device; `uid == nil` clears the target.
+    private struct Choice {
+        let direction: Direction
+        let uid: String?
+    }
 
     private let log = Logger(subsystem: "com.morrish.AudioAutoSwitch", category: "switch")
     private let defaults = UserDefaults.standard
     private var statusItem: NSStatusItem!
     private var retryTimer: Timer?
     private var attempts = 0
+    private var pending: [Direction] = []
 
-    private var targetUID: String? {
-        get { defaults.string(forKey: Self.targetUIDKey) }
-        set { defaults.set(newValue, forKey: Self.targetUIDKey) }
+    /// Volume percentage (10–100) applied to the target output device, or nil to leave volume and mute unchanged.
+    /// Defaults to 100. Stored as 0 for nil.
+    private var targetVolume: Int? {
+        get {
+            let stored = defaults.object(forKey: Self.targetVolumeKey) as? Int ?? 100
+            return stored == 0 ? nil : stored
+        }
+        set { defaults.set(newValue ?? 0, forKey: Self.targetVolumeKey) }
     }
 
-    private var targetName: String? {
-        get { defaults.string(forKey: Self.targetNameKey) }
-        set { defaults.set(newValue, forKey: Self.targetNameKey) }
+    private var targetVolumeLabel: String {
+        targetVolume.map { "\($0)%" } ?? "Don't Change"
     }
 
-    /// Volume percentage (10–100) applied to the target device. Defaults to 100.
-    private var targetVolume: Int {
-        get { defaults.object(forKey: Self.targetVolumeKey) as? Int ?? 100 }
-        set { defaults.set(newValue, forKey: Self.targetVolumeKey) }
+    private func uidKey(_ direction: Direction) -> String {
+        direction == .output ? "targetDeviceUID" : "targetInputUID"
+    }
+
+    private func nameKey(_ direction: Direction) -> String {
+        direction == .output ? "targetDeviceName" : "targetInputName"
+    }
+
+    private func targetUID(_ direction: Direction) -> String? {
+        defaults.string(forKey: uidKey(direction))
+    }
+
+    private func targetName(_ direction: Direction) -> String? {
+        defaults.string(forKey: nameKey(direction))
+    }
+
+    private func setTarget(_ direction: Direction, uid: String?, name: String?) {
+        defaults.set(uid, forKey: uidKey(direction))
+        defaults.set(name, forKey: nameKey(direction))
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -44,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil
         )
-        AudioDevices.observeOutputChanges { [weak self] in
+        AudioDevices.observeChanges { [weak self] in
             MainActor.assumeIsolated { self?.updateIcon() }
         }
 
@@ -62,52 +88,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func applyWithRetry() {
         retryTimer?.invalidate()
         attempts = 0
-        guard targetUID != nil else { return }
-        if apply() { return }
+        pending = Direction.allCases.filter { targetUID($0) != nil }
+        if applyPending() { return }
         retryTimer = Timer.scheduledTimer(withTimeInterval: Self.retryInterval, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { return timer.invalidate() }
-                if self.apply() || self.attempts >= Self.maxAttempts {
+                if self.applyPending() {
                     timer.invalidate()
                 }
             }
         }
     }
 
-    /// Returns true if the target device was found (whether or not every step succeeded).
-    @discardableResult
-    private func apply() -> Bool {
+    /// Applies each pending target that is connected. Returns true when nothing is left to retry.
+    private func applyPending() -> Bool {
         attempts += 1
-        guard let uid = targetUID else { return true }
-        guard let device = AudioDevices.outputDevices().first(where: { $0.uid == uid }) else {
-            if attempts >= Self.maxAttempts {
-                log.info("Target \(self.targetName ?? uid, privacy: .public) not connected, doing nothing")
-            }
-            return false
+        pending = pending.filter { !apply($0) }
+        guard !pending.isEmpty else { return true }
+        guard attempts >= Self.maxAttempts else { return false }
+        for direction in pending {
+            let target = targetName(direction) ?? targetUID(direction) ?? "none"
+            log.info("\(direction.label, privacy: .public) target \(target, privacy: .public) not connected, doing nothing")
         }
+        pending = []
+        return true
+    }
 
-        if AudioDevices.defaultOutputDeviceID() != device.id, !AudioDevices.setDefaultOutput(device.id) {
-            log.error("Failed to set default output to \(device.name, privacy: .public)")
+    /// Returns true if the target device was found (whether or not every step succeeded).
+    private func apply(_ direction: Direction) -> Bool {
+        guard let uid = targetUID(direction) else { return true }
+        guard let device = AudioDevices.devices(direction).first(where: { $0.uid == uid }) else { return false }
+
+        if AudioDevices.defaultDeviceID(direction) != device.id, !AudioDevices.setDefault(device.id, direction) {
+            log.error("Failed to set default \(direction.label, privacy: .public) to \(device.name, privacy: .public)")
         }
-        let volume = targetVolume
-        if !AudioDevices.setVolume(device.id, Float32(volume) / 100) {
-            log.error("\(device.name, privacy: .public) has no settable volume")
+        guard let volume = direction == .output ? targetVolume : Self.inputVolume else {
+            log.info("\(direction.label, privacy: .public) switched to \(device.name, privacy: .public), volume unchanged")
+            return true
         }
-        AudioDevices.unmute(device.id)
-        log.info("Switched to \(device.name, privacy: .public) at \(volume)%")
+        if !AudioDevices.setVolume(device.id, direction, Float32(volume) / 100) {
+            log.error("\(device.name, privacy: .public) has no settable \(direction.label, privacy: .public) volume")
+        }
+        AudioDevices.unmute(device.id, direction)
+        log.info("\(direction.label, privacy: .public) switched to \(device.name, privacy: .public) at \(volume)%")
         return true
     }
 
     // MARK: - Icon
 
-    /// Normal speaker when the target is the current output (or no target is set), warning badge otherwise.
+    /// Normal speaker when every configured target is the current device, warning badge otherwise.
     private func updateIcon() {
-        let currentID = AudioDevices.defaultOutputDeviceID()
-        let current = AudioDevices.outputDevices().first { $0.id == currentID }
-        let onTarget = targetUID == nil || current?.uid == targetUID
+        var onTarget = true
+        var lines: [String] = []
+        for direction in Direction.allCases {
+            let currentID = AudioDevices.defaultDeviceID(direction)
+            let current = AudioDevices.devices(direction).first { $0.id == currentID }
+            if let uid = targetUID(direction), current?.uid != uid {
+                onTarget = false
+            }
+            lines.append("\(direction.label): \(current?.name ?? "unknown")")
+        }
         let symbol = onTarget ? "speaker.wave.3" : "speaker.badge.exclamationmark"
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "AudioAutoSwitch")
-        statusItem.button?.toolTip = "Output: \(current?.name ?? "unknown")"
+        statusItem.button?.toolTip = lines.joined(separator: "\n")
     }
 
     // MARK: - Menu
@@ -115,49 +158,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        let devices = AudioDevices.outputDevices()
-        let connected = devices.contains { $0.uid == targetUID }
-        let title: String
-        if let name = targetName {
-            title = "Target: \(name)" + (connected ? "" : " (not connected)")
-        } else {
-            title = "Target: none"
+        var anyConnected = false
+        for direction in Direction.allCases {
+            if addTargetItems(to: menu, direction) {
+                anyConnected = true
+            }
+            if direction == .output {
+                addVolumeItem(to: menu)
+            }
+            menu.addItem(.separator())
         }
-        menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: ""))
-
-        let deviceMenu = NSMenu()
-        for device in devices {
-            let item = NSMenuItem(title: device.name, action: #selector(selectDevice(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = device.uid
-            item.state = device.uid == targetUID ? .on : .off
-            deviceMenu.addItem(item)
-        }
-        if targetUID != nil {
-            deviceMenu.addItem(.separator())
-            let clear = NSMenuItem(title: "None", action: #selector(clearDevice), keyEquivalent: "")
-            clear.target = self
-            deviceMenu.addItem(clear)
-        }
-        let deviceItem = NSMenuItem(title: "Target Device", action: nil, keyEquivalent: "")
-        deviceItem.submenu = deviceMenu
-        menu.addItem(deviceItem)
-
-        let volumeMenu = NSMenu()
-        for percent in Self.volumeChoices {
-            let item = NSMenuItem(title: "\(percent)%", action: #selector(selectVolume(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = percent
-            item.state = percent == targetVolume ? .on : .off
-            volumeMenu.addItem(item)
-        }
-        let volumeItem = NSMenuItem(title: "Target Volume: \(targetVolume)%", action: nil, keyEquivalent: "")
-        volumeItem.submenu = volumeMenu
-        menu.addItem(volumeItem)
 
         let applyItem = NSMenuItem(title: "Apply Now", action: #selector(applyNow), keyEquivalent: "")
         applyItem.target = self
-        applyItem.isEnabled = connected
+        applyItem.isEnabled = anyConnected
         menu.addItem(applyItem)
 
         menu.addItem(.separator())
@@ -170,24 +184,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
-    @objc private func selectDevice(_ sender: NSMenuItem) {
-        guard let uid = sender.representedObject as? String else { return }
-        targetUID = uid
-        targetName = sender.title
+    /// Adds the target status line and device picker for one direction. Returns true if its target is connected.
+    private func addTargetItems(to menu: NSMenu, _ direction: Direction) -> Bool {
+        let devices = AudioDevices.devices(direction)
+        let uid = targetUID(direction)
+        let connected = devices.contains { $0.uid == uid }
+        let title = if let name = targetName(direction) {
+            "Target \(direction.label): \(name)" + (connected ? "" : " (not connected)")
+        } else {
+            "Target \(direction.label): none"
+        }
+        menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: ""))
+
+        let deviceMenu = NSMenu()
+        for device in devices {
+            let item = NSMenuItem(title: device.name, action: #selector(selectTarget(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = Choice(direction: direction, uid: device.uid)
+            item.state = device.uid == uid ? .on : .off
+            deviceMenu.addItem(item)
+        }
+        if uid != nil {
+            deviceMenu.addItem(.separator())
+            let clear = NSMenuItem(title: "None", action: #selector(selectTarget(_:)), keyEquivalent: "")
+            clear.target = self
+            clear.representedObject = Choice(direction: direction, uid: nil)
+            deviceMenu.addItem(clear)
+        }
+        let deviceItem = NSMenuItem(title: "Target \(direction.label) Device", action: nil, keyEquivalent: "")
+        deviceItem.submenu = deviceMenu
+        menu.addItem(deviceItem)
+        return connected
+    }
+
+    private func addVolumeItem(to menu: NSMenu) {
+        let volumeMenu = NSMenu()
+        let unchanged = NSMenuItem(title: "Don't Change", action: #selector(selectVolume(_:)), keyEquivalent: "")
+        unchanged.target = self
+        unchanged.tag = 0
+        unchanged.state = targetVolume == nil ? .on : .off
+        volumeMenu.addItem(unchanged)
+        volumeMenu.addItem(.separator())
+        for percent in Self.volumeChoices {
+            let item = NSMenuItem(title: "\(percent)%", action: #selector(selectVolume(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = percent
+            item.state = percent == targetVolume ? .on : .off
+            volumeMenu.addItem(item)
+        }
+        let volumeItem = NSMenuItem(title: "Target Output Volume: \(targetVolumeLabel)", action: nil, keyEquivalent: "")
+        volumeItem.submenu = volumeMenu
+        menu.addItem(volumeItem)
+    }
+
+    @objc private func selectTarget(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? Choice else { return }
+        setTarget(choice.direction, uid: choice.uid, name: choice.uid == nil ? nil : sender.title)
         updateIcon()
         applyWithRetry()
     }
 
     @objc private func selectVolume(_ sender: NSMenuItem) {
-        targetVolume = sender.tag
+        targetVolume = sender.tag == 0 ? nil : sender.tag
         applyWithRetry()
-    }
-
-    @objc private func clearDevice() {
-        retryTimer?.invalidate()
-        targetUID = nil
-        targetName = nil
-        updateIcon()
     }
 
     @objc private func applyNow() {

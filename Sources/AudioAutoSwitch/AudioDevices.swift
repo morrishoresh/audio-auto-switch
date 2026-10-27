@@ -6,65 +6,92 @@ struct AudioDevice {
     let name: String
 }
 
+enum Direction: CaseIterable {
+    case output
+    case input
+
+    var label: String {
+        switch self {
+        case .output: "Output"
+        case .input: "Input"
+        }
+    }
+
+    fileprivate var scope: AudioObjectPropertyScope {
+        switch self {
+        case .output: kAudioDevicePropertyScopeOutput
+        case .input: kAudioDevicePropertyScopeInput
+        }
+    }
+
+    fileprivate var defaultDeviceSelector: AudioObjectPropertySelector {
+        switch self {
+        case .output: kAudioHardwarePropertyDefaultOutputDevice
+        case .input: kAudioHardwarePropertyDefaultInputDevice
+        }
+    }
+}
+
 enum AudioDevices {
     private static let system = AudioObjectID(kAudioObjectSystemObject)
 
-    static func outputDevices() -> [AudioDevice] {
+    static func devices(_ direction: Direction) -> [AudioDevice] {
         var address = globalAddress(kAudioHardwarePropertyDevices)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr else { return [] }
         var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
         guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &ids) == noErr else { return [] }
 
-        return ids.filter { outputChannelCount($0) > 0 }.compactMap { id in
+        return ids.filter { channelCount($0, direction) > 0 }.compactMap { id in
             guard let uid = stringProperty(id, kAudioDevicePropertyDeviceUID),
                   let name = stringProperty(id, kAudioObjectPropertyName) else { return nil }
             return AudioDevice(id: id, uid: uid, name: name)
         }
     }
 
-    static func defaultOutputDeviceID() -> AudioDeviceID? {
-        var address = globalAddress(kAudioHardwarePropertyDefaultOutputDevice)
+    static func defaultDeviceID(_ direction: Direction) -> AudioDeviceID? {
+        var address = globalAddress(direction.defaultDeviceSelector)
         var id = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &id) == noErr else { return nil }
         return id
     }
 
-    /// Calls `handler` on the main queue whenever the default output device changes, or devices are added or removed.
-    static func observeOutputChanges(_ handler: @escaping @Sendable () -> Void) {
-        for selector in [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices] {
+    /// Calls `handler` on the main queue whenever the default output or input device changes, or devices are added or removed.
+    static func observeChanges(_ handler: @escaping @Sendable () -> Void) {
+        let selectors = Direction.allCases.map(\.defaultDeviceSelector) + [kAudioHardwarePropertyDevices]
+        for selector in selectors {
             var address = globalAddress(selector)
             AudioObjectAddPropertyListenerBlock(system, &address, .main) { _, _ in handler() }
         }
     }
 
-    static func setDefaultOutput(_ id: AudioDeviceID) -> Bool {
-        var address = globalAddress(kAudioHardwarePropertyDefaultOutputDevice)
+    static func setDefault(_ id: AudioDeviceID, _ direction: Direction) -> Bool {
+        var address = globalAddress(direction.defaultDeviceSelector)
         var deviceID = id
         let size = UInt32(MemoryLayout<AudioDeviceID>.size)
         return AudioObjectSetPropertyData(system, &address, 0, nil, size, &deviceID) == noErr
     }
 
-    /// Sets output volume on the main element, or on each channel if the device has no main volume control.
+    /// Sets volume on the main element, or on each channel if the device has no main volume control.
     /// Returns false if the device exposes no settable volume (e.g. most HDMI/DisplayPort outputs).
-    static func setVolume(_ id: AudioDeviceID, _ volume: Float32) -> Bool {
-        if setOutputProperty(id, kAudioDevicePropertyVolumeScalar, element: kAudioObjectPropertyElementMain, value: volume) {
+    static func setVolume(_ id: AudioDeviceID, _ direction: Direction, _ volume: Float32) -> Bool {
+        if setProperty(id, direction, kAudioDevicePropertyVolumeScalar, element: kAudioObjectPropertyElementMain, value: volume) {
             return true
         }
-        let channels = outputChannelCount(id)
+        let channels = channelCount(id, direction)
         guard channels > 0 else { return false }
         var any = false
         for channel in 1...channels {
-            if setOutputProperty(id, kAudioDevicePropertyVolumeScalar, element: UInt32(channel), value: volume) {
+            if setProperty(id, direction, kAudioDevicePropertyVolumeScalar, element: UInt32(channel), value: volume) {
                 any = true
             }
         }
         return any
     }
 
-    static func unmute(_ id: AudioDeviceID) {
-        _ = setOutputProperty(id, kAudioDevicePropertyMute, element: kAudioObjectPropertyElementMain, value: UInt32(0))
+    static func unmute(_ id: AudioDeviceID, _ direction: Direction) {
+        _ = setProperty(id, direction, kAudioDevicePropertyMute, element: kAudioObjectPropertyElementMain, value: UInt32(0))
     }
 
     // MARK: - Helpers
@@ -77,10 +104,10 @@ enum AudioDevices {
         )
     }
 
-    private static func outputChannelCount(_ id: AudioDeviceID) -> Int {
+    private static func channelCount(_ id: AudioDeviceID, _ direction: Direction) -> Int {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeOutput,
+            mScope: direction.scope,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
@@ -100,15 +127,16 @@ enum AudioDevices {
         return value.takeRetainedValue() as String
     }
 
-    private static func setOutputProperty<T: BitwiseCopyable>(
+    private static func setProperty<T: BitwiseCopyable>(
         _ id: AudioDeviceID,
+        _ direction: Direction,
         _ selector: AudioObjectPropertySelector,
         element: AudioObjectPropertyElement,
         value: T
     ) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: selector,
-            mScope: kAudioDevicePropertyScopeOutput,
+            mScope: direction.scope,
             mElement: element
         )
         guard AudioObjectHasProperty(id, &address) else { return false }
