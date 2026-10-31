@@ -6,6 +6,8 @@
     <string>com.morrishoresh.AudioAutoSwitch</string>
     <key>CFBundleName</key>
     <string>AudioAutoSwitch</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleExecutable</key>
     <string>AudioAutoSwitch</string>
     <key>CFBundlePackageType</key>
