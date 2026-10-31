@@ -4,10 +4,7 @@ import os
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private static let targetVolumeKey = "targetVolume"
     private static let volumeChoices = stride(from: 10, through: 100, by: 10).map { $0 }
-    /// Input devices are always set to full volume.
-    private static let inputVolume = 100
     /// Bluetooth devices often reconnect a few seconds after wake/login, so keep looking for a while.
     private static let retryInterval: TimeInterval = 1
     private static let maxAttempts = 20
@@ -18,6 +15,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let uid: String?
     }
 
+    /// Menu item payload for picking a target volume; `percent == nil` means "Don't Change".
+    private struct VolumeChoice {
+        let direction: Direction
+        let percent: Int?
+    }
+
     private let log = Logger(subsystem: "com.morrishoresh.AudioAutoSwitch", category: "switch")
     private let defaults = UserDefaults.standard
     private var statusItem: NSStatusItem!
@@ -25,18 +28,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var attempts = 0
     private var pending: [Direction] = []
 
-    /// Volume percentage (10–100) applied to the target output device, or nil to leave volume and mute unchanged.
-    /// Defaults to 100. Stored as 0 for nil.
-    private var targetVolume: Int? {
-        get {
-            let stored = defaults.object(forKey: Self.targetVolumeKey) as? Int ?? 100
-            return stored == 0 ? nil : stored
-        }
-        set { defaults.set(newValue ?? 0, forKey: Self.targetVolumeKey) }
+    private func volumeKey(_ direction: Direction) -> String {
+        direction == .output ? "targetVolume" : "targetInputVolume"
     }
 
-    private var targetVolumeLabel: String {
-        targetVolume.map { "\($0)%" } ?? "Don't Change"
+    /// Volume percentage (10–100) applied to the target device, or nil to leave volume and mute unchanged.
+    /// Defaults to nil. Stored as 0 for nil.
+    private func targetVolume(_ direction: Direction) -> Int? {
+        let stored = defaults.integer(forKey: volumeKey(direction))
+        return stored == 0 ? nil : stored
+    }
+
+    private func setTargetVolume(_ direction: Direction, _ percent: Int?) {
+        defaults.set(percent ?? 0, forKey: volumeKey(direction))
+    }
+
+    private func targetVolumeLabel(_ direction: Direction) -> String {
+        targetVolume(direction).map { "\($0)%" } ?? "Don't Change"
     }
 
     private func uidKey(_ direction: Direction) -> String {
@@ -122,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if AudioDevices.defaultDeviceID(direction) != device.id, !AudioDevices.setDefault(device.id, direction) {
             log.error("Failed to set default \(direction.label, privacy: .public) to \(device.name, privacy: .public)")
         }
-        guard let volume = direction == .output ? targetVolume : Self.inputVolume else {
+        guard let volume = targetVolume(direction) else {
             log.info("\(direction.label, privacy: .public) switched to \(device.name, privacy: .public), volume unchanged")
             return true
         }
@@ -163,9 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if addTargetItems(to: menu, direction) {
                 anyConnected = true
             }
-            if direction == .output {
-                addVolumeItem(to: menu)
-            }
+            addVolumeItem(to: menu, direction)
             menu.addItem(.separator())
         }
 
@@ -217,22 +223,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return connected
     }
 
-    private func addVolumeItem(to menu: NSMenu) {
+    private func addVolumeItem(to menu: NSMenu, _ direction: Direction) {
+        let current = targetVolume(direction)
         let volumeMenu = NSMenu()
         let unchanged = NSMenuItem(title: "Don't Change", action: #selector(selectVolume(_:)), keyEquivalent: "")
         unchanged.target = self
-        unchanged.tag = 0
-        unchanged.state = targetVolume == nil ? .on : .off
+        unchanged.representedObject = VolumeChoice(direction: direction, percent: nil)
+        unchanged.state = current == nil ? .on : .off
         volumeMenu.addItem(unchanged)
         volumeMenu.addItem(.separator())
         for percent in Self.volumeChoices {
             let item = NSMenuItem(title: "\(percent)%", action: #selector(selectVolume(_:)), keyEquivalent: "")
             item.target = self
-            item.tag = percent
-            item.state = percent == targetVolume ? .on : .off
+            item.representedObject = VolumeChoice(direction: direction, percent: percent)
+            item.state = percent == current ? .on : .off
             volumeMenu.addItem(item)
         }
-        let volumeItem = NSMenuItem(title: "Target Output Volume: \(targetVolumeLabel)", action: nil, keyEquivalent: "")
+        let title = "Target \(direction.label) Volume: \(targetVolumeLabel(direction))"
+        let volumeItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         volumeItem.submenu = volumeMenu
         menu.addItem(volumeItem)
     }
@@ -245,7 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func selectVolume(_ sender: NSMenuItem) {
-        targetVolume = sender.tag == 0 ? nil : sender.tag
+        guard let choice = sender.representedObject as? VolumeChoice else { return }
+        setTargetVolume(choice.direction, choice.percent)
         applyWithRetry()
     }
 
