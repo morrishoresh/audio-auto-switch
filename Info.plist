@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.morrish.AudioAutoSwitch</string>
+    <string>com.morrishoresh.AudioAutoSwitch</string>
     <key>CFBundleName</key>
     <string>AudioAutoSwitch</string>
     <key>CFBundleExecutable</key>

@@ -20,7 +20,7 @@ A target that is not connected is left alone. Retries for 20 s to catch Bluetoot
 2. Target Output Device / Target Input Device -> pick the devices; Target Output Volume -> pick the level.
 3. Enable Launch at Login.
 
-Logs: `log stream --predicate 'subsystem == "com.morrish.AudioAutoSwitch"'`
+Logs: `log stream --predicate 'subsystem == "com.morrishoresh.AudioAutoSwitch"'`
 
 Devices without software volume (most HDMI/DisplayPort outputs) are switched to, but volume is left unchanged.
 

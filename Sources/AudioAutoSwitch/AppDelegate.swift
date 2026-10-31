@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let uid: String?
     }
 
-    private let log = Logger(subsystem: "com.morrish.AudioAutoSwitch", category: "switch")
+    private let log = Logger(subsystem: "com.morrishoresh.AudioAutoSwitch", category: "switch")
     private let defaults = UserDefaults.standard
     private var statusItem: NSStatusItem!
     private var retryTimer: Timer?
