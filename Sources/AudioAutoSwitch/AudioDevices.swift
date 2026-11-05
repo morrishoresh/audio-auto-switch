@@ -50,11 +50,12 @@ enum AudioDevices {
     }
 
     static func defaultDeviceID(_ direction: Direction) -> AudioDeviceID? {
-        var address = globalAddress(direction.defaultDeviceSelector)
-        var id = AudioDeviceID(0)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &id) == noErr else { return nil }
-        return id
+        deviceID(direction.defaultDeviceSelector)
+    }
+
+    /// Device used for alerts and sound effects (System Settings > Sound > Play sound effects through).
+    static func systemOutputDeviceID() -> AudioDeviceID? {
+        deviceID(kAudioHardwarePropertyDefaultSystemOutputDevice)
     }
 
     /// Calls `handler` on the main queue whenever the default output or input device changes, or devices are added or removed.
@@ -67,10 +68,11 @@ enum AudioDevices {
     }
 
     static func setDefault(_ id: AudioDeviceID, _ direction: Direction) -> Bool {
-        var address = globalAddress(direction.defaultDeviceSelector)
-        var deviceID = id
-        let size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        return AudioObjectSetPropertyData(system, &address, 0, nil, size, &deviceID) == noErr
+        setDeviceID(direction.defaultDeviceSelector, id)
+    }
+
+    static func setSystemOutput(_ id: AudioDeviceID) -> Bool {
+        setDeviceID(kAudioHardwarePropertyDefaultSystemOutputDevice, id)
     }
 
     /// Sets volume on the main element, or on each channel if the device has no main volume control.
@@ -102,6 +104,21 @@ enum AudioDevices {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
+    }
+
+    private static func deviceID(_ selector: AudioObjectPropertySelector) -> AudioDeviceID? {
+        var address = globalAddress(selector)
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &id) == noErr else { return nil }
+        return id
+    }
+
+    private static func setDeviceID(_ selector: AudioObjectPropertySelector, _ id: AudioDeviceID) -> Bool {
+        var address = globalAddress(selector)
+        var deviceID = id
+        let size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        return AudioObjectSetPropertyData(system, &address, 0, nil, size, &deviceID) == noErr
     }
 
     private static func channelCount(_ id: AudioDeviceID, _ direction: Direction) -> Int {

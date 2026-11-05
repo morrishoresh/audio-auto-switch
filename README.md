@@ -2,7 +2,7 @@
 
 Menu-bar app. On launch and on every wake from sleep:
 
-- If the configured output device is connected, it becomes the default output. With Target Output Volume set to a level, its volume is set to that level and unmuted; with "Don't Change" (default), volume and mute are left as they are.
+- If the configured output device is connected, it becomes the default output and the sound effects output. With Target Output Volume set to a level, its volume is set to that level and unmuted; with "Don't Change" (default), volume and mute are left as they are.
 - If the configured input device is connected, it becomes the default input. Target Input Volume works the same way, also defaulting to "Don't Change".
 
 A target that is not connected is left alone. Retries for 20 s to catch Bluetooth devices that reconnect late.

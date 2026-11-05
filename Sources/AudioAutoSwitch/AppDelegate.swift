@@ -130,6 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if AudioDevices.defaultDeviceID(direction) != device.id, !AudioDevices.setDefault(device.id, direction) {
             log.error("Failed to set default \(direction.label, privacy: .public) to \(device.name, privacy: .public)")
         }
+        if direction == .output, AudioDevices.systemOutputDeviceID() != device.id, !AudioDevices.setSystemOutput(device.id) {
+            log.error("Failed to set sound effects output to \(device.name, privacy: .public)")
+        }
         guard let volume = targetVolume(direction) else {
             log.info("\(direction.label, privacy: .public) switched to \(device.name, privacy: .public), volume unchanged")
             return true
